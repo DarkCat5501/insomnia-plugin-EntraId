@@ -1,0 +1,20 @@
+{
+  "name": "insomnia-plugin-entra-id-auth",
+  "version": "1.0.0",
+  "description": "Plugin Insomnia para autenticação OAuth2 PKCE com EntraId",
+  "main": "src/index.js",
+  "insomnia": {
+    "name": "EntraId Auth",
+    "description": "Autenticação OAuth2 PKCE com EntraId - Configure clientId, authority, scopes e redirectUri no body",
+    "icon": "fa-lock",
+    "template": {
+      "name": "EntraId",
+      "parameters": []
+    }
+  },
+  "dependencies": {
+    "@elysiajs/cors": "^1.4.1",
+    "elysia": "^1.4.27",
+    "open": "^8.4.2"
+  }
+}
