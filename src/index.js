@@ -1,6 +1,22 @@
-const open = require("open");
+const os = require("os");
+const { exec } = require("child_process");
 const http = require("http");
 const crypto = require("crypto");
+
+const STORE_PREFIX = "entraid_";
+
+function open(url) {
+	let command;
+	if (os.platform() === "win32") command = `start "${url}"`;
+	else if (os.platform() === "darwin") command = `open "${url}"`;
+	else command = `xdg-open "${url}"`;
+
+	return exec(command, (err) => {
+		if (err) {
+			console.error(`Failed to open URL: ${err}`);
+		}
+	});
+}
 
 function generatePKCE() {
 	const verifier = crypto.randomBytes(32).toString("base64url");
@@ -20,7 +36,9 @@ function parseUrl(urlStr) {
 }
 
 function startCallbackServer(port) {
-	return new Promise((resolve) => {
+	return new Promise((resolve, reject) => {
+		let timer;
+
 		const server = http.createServer((req, res) => {
 			const parsedUrl = parseUrl(`http://localhost${req.url}`);
 
@@ -32,10 +50,11 @@ function startCallbackServer(port) {
 
 				res.writeHead(200, { "Content-Type": "text/html" });
 				res.end(
-					"<html><body><h1>Autenticado com sucesso!</h1><p>Você pode fechar esta aba e retornar ao Insomnia.</p><script>window.close()</script></body></html>",
+					"<html><body><h1>Autenticado com sucesso!</h1><p>Voce pode fechar esta aba e retornar ao Insomnia.</p><script>window.close()</script></body></html>",
 				);
 
 				server.close();
+				if (timer) clearTimeout(timer);
 				resolve(params);
 			} else {
 				res.writeHead(400);
@@ -45,6 +64,11 @@ function startCallbackServer(port) {
 
 		server.listen(port, () => {
 			console.log(`[EntraId] Servidor de callback iniciado na porta ${port}`);
+
+			timer = setTimeout(() => {
+				server.close();
+				reject(new Error("Timeout was reached"));
+			}, 60 * 1000);
 		});
 
 		server.on("error", (err) => {
@@ -62,11 +86,12 @@ async function authenticateEntraId(
 	authority,
 	redirectUri,
 	scopes,
-	state,
+	selectAccount,
 ) {
 	const { verifier, challenge } = generatePKCE();
 
 	const scopeStr = Array.isArray(scopes) ? scopes.join(" ") : scopes;
+	const promptParam = selectAccount ? "&prompt=select_account" : "";
 	const authUrl =
 		`${authority}/oauth2/v2.0/authorize?` +
 		`client_id=${encodeURIComponent(clientId)}` +
@@ -76,7 +101,9 @@ async function authenticateEntraId(
 		`&scope=${encodeURIComponent(scopeStr)}` +
 		`&code_challenge=${challenge}` +
 		`&code_challenge_method=S256` +
-		`&state=${state}`;
+		promptParam;
+	//TODO: acrescentar o state
+	// +`&state=${state}`;
 
 	console.log("[EntraId] Abrindo navegador para autenticacao...");
 
@@ -84,7 +111,7 @@ async function authenticateEntraId(
 	const port = redirectParsed ? parseInt(redirectParsed.port) : 8090;
 
 	const callbackPromise = startCallbackServer(port);
-	await open(authUrl);
+	open(authUrl);
 
 	console.log("[EntraId] Aguardando callback...");
 	const params = await callbackPromise;
@@ -100,150 +127,173 @@ async function authenticateEntraId(
 	};
 }
 
+function getStoreKey(variable) {
+	return STORE_PREFIX + (variable || "default");
+}
+
 module.exports = {
 	name: "EntraId Auth",
 	version: "1.0.0",
-	description: "Autenticação OAuth2 PKCE com EntraId",
+	description: "Autenticacao OAuth2 PKCE com EntraId",
 	icon: "fa-lock",
 	templateTags: [
 		{
 			name: "ENTRAID_AUTH",
 			label: "EntraId Auth",
 			icon: "fa-lock",
-			description: "Autentica com EntraId e retorna code e code_verifier",
+			description:
+				"Autentica com EntraId e salva code e code_verifier no store",
 			args: [
 				{
 					name: "clientId",
-					label: "Client ID",
+					displayName: "Client ID",
 					type: "string",
-					placeholder: "Seu clientId do Azure AD",
+					description: "Seu clientId do Azure AD",
 				},
 				{
 					name: "authority",
-					label: "Authority",
+					displayName: "Authority",
 					type: "string",
-					placeholder: "https://login.microsoftonline.com/your-tenant-id",
+					description: "https://login.microsoftonline.com/your-tenant-id",
 				},
 				{
 					name: "redirectUri",
-					label: "Redirect URI",
+					displayName: "Redirect URI",
 					type: "string",
-					placeholder: "http://localhost:3847/callback",
+					description: "http://localhost:3847/callback",
 				},
 				{
 					name: "scopes",
-					label: "Scopes",
+					displayName: "Scopes",
 					type: "string",
-					placeholder: "User.Read",
+					description: "User.Read",
+				},
+				{
+					name: "variable",
+					displayName: "Variable",
+					type: "string",
+					description: "Nome da variavel para salvar no store",
+				},
+				{
+					name: "selectAccount",
+					displayName: "Select Account",
+					type: "boolean",
+					description: "Mostrar tela de seleção de conta",
+					value: false,
 				},
 			],
 			liveDisplayName: (args) => {
-				const [clientId, authority, redirectUri, scopes] = args;
-				return `=>${redirectUri.value} scopes: ${scopes.value}, clientId: ${clientId.value}, authority: ${authority.value}`;
+				const [
+					clientId,
+					authority,
+					redirectUri,
+					scopes,
+					variable,
+					selectAccount,
+				] = args;
+				const varName = variable?.value || "default";
+				const accountStr = selectAccount?.value ? " [selectAccount]" : "";
+				return `EntraId: ${varName}${accountStr} [>${redirectUri.value}] clientId:${clientId.value}, scopes:${scopes.value}, authority: ${authority.value}`;
 			},
 			async run(context, ...args) {
-				// console.log("args:", args);
-				const [clientId, authority, redirectUri, scopes] = args;
+				const [
+					clientId,
+					authority,
+					redirectUri,
+					scopes,
+					variable,
+					selectAccount,
+				] = args;
+				const varName = variable || "default";
+
 				if (context.renderPurpose === "send") {
-					console.log("context:", context);
-					// const scopeArray = scopes
-					//   ? scopes.split(" ").filter((s) => s)
-					//   : ["User.Read"];
-					// const result = await authenticateEntraId(
-					//   clientId,
-					//   authority || "https://login.microsoftonline.com/common",
-					//   redirectUri || "http://localhost:3847/callback",
-					//   scopeArray,
-					//   "test",
-					// );
-					// return JSON.stringify(result, null, 2);
+					const scopeArray = scopes
+						? scopes.split(" ").filter((s) => s)
+						: ["User.Read"];
+					const result = await authenticateEntraId(
+						clientId,
+						authority,
+						redirectUri,
+						scopeArray,
+						selectAccount,
+					);
+					const key = getStoreKey(varName);
+					await context.store.setItem(key, JSON.stringify(result));
+
+					return JSON.stringify(result, null, 2);
 				} else {
-					return `=>${redirectUri} scopes: ${scopes}, clientId: ${clientId}, authority: ${authority}`;
+					const accountStr = selectAccount ? " [selectAccount]" : "";
+					return `EntraId: ${varName}${accountStr} [>${redirectUri}] clientId:${clientId}, scopes:${scopes}, authority: ${authority}`;
 				}
 			},
 		},
-	],
+		{
+			name: "ENTRAID_CODE",
+			label: "EntraId Code",
+			icon: "fa-key",
+			description: "Retorna o code salvo no store",
+			args: [
+				{
+					name: "variable",
+					label: "Variable",
+					type: "string",
+					placeholder: "Nome da variavel",
+				},
+			],
+			liveDisplayName: (args) => {
+				const [variable] = args;
+				return `Code: ${variable?.value || "default"}`;
+			},
+			async run(context, ...args) {
+				const [variable] = args;
+				const varName = variable || "default";
 
-	reqquestHooks: [
-		async (context) => {
-			console.log("send:", context);
+				const key = getStoreKey(varName);
+				const stored = await context.store.getItem(key);
 
-			// const url = request.getUrl();
-			//
-			// // Interceptar URLs com scheme especial
-			// if (url.startsWith("entraid://") || url.startsWith("entraid-auth://")) {
-			// 	try {
-			// 		let bodyParams = {};
-			// 		const requestBody = request.getBody();
-			//
-			// 		if (requestBody) {
-			// 			if (typeof requestBody === "string") {
-			// 				bodyParams = JSON.parse(requestBody);
-			// 			} else {
-			// 				bodyParams = requestBody;
-			// 			}
-			// 		}
-			//
-			// 		const cleanUrl = url.replace(/^entraid-auth?:\/\//, "");
-			// 		const parsedUrl = parseUrl(cleanUrl);
-			// 		if (parsedUrl) {
-			// 			parsedUrl.searchParams.forEach((value, key) => {
-			// 				bodyParams[key] = value;
-			// 			});
-			// 		}
-			//
-			// 		const {
-			// 			clientId,
-			// 			authority = "https://login.microsoftonline.com/common",
-			// 			redirectUri = "http://localhost:3847/callback",
-			// 			scopes = ["User.Read"],
-			// 			state = "test",
-			// 		} = bodyParams;
-			//
-			// 		if (!clientId) {
-			// 			throw new Error("clientId e obrigatorio no body");
-			// 		}
-			//
-			// 		const result = await authenticateEntraId(
-			// 			clientId,
-			// 			authority,
-			// 			redirectUri,
-			// 			scopes,
-			// 			state,
-			// 		);
-			//
-			// 		const responseBody = JSON.stringify(
-			// 			{
-			// 				success: true,
-			// 				...result,
-			// 				expires_in: 600,
-			// 				message: "Use code e code_verifier para obter o token de acesso",
-			// 			},
-			// 			null,
-			// 			2,
-			// 		);
-			//
-			// 		await send({
-			// 			status: 200,
-			// 			statusText: "OK",
-			// 			headers: { "content-type": "application/json" },
-			// 			data: responseBody,
-			// 		});
-			//
-			// 		return true;
-			// 	} catch (error) {
-			// 		const errorBody = JSON.stringify({ error: error.message }, null, 2);
-			// 		await send({
-			// 			status: 500,
-			// 			statusText: "Error",
-			// 			headers: { "content-type": "application/json" },
-			// 			data: errorBody,
-			// 		});
-			// 		return true;
-			// 	}
-			// }
+				if (!stored) {
+					throw new Error(
+						`Nenhum token encontrado para variavel: ${varName}. Execute ENTRAID_AUTH primeiro.`,
+					);
+				}
 
-			return;
+				const data = JSON.parse(stored);
+				return data.code;
+			},
+		},
+		{
+			name: "ENTRAID_CODE_VERIFIER",
+			label: "EntraId Code Verifier",
+			icon: "fa-key",
+			description: "Retorna o code_verifier salvo no store",
+			args: [
+				{
+					name: "variable",
+					label: "Variable",
+					type: "string",
+					placeholder: "Nome da variavel",
+				},
+			],
+			liveDisplayName: (args) => {
+				const [variable] = args;
+				return `Verifier: ${variable?.value || "default"}`;
+			},
+			async run(context, ...args) {
+				const [variable] = args;
+				const varName = variable || "default";
+
+				const key = getStoreKey(varName);
+				const stored = await context.store.getItem(key);
+
+				if (!stored) {
+					throw new Error(
+						`Nenhum token encontrado para variavel: ${varName}. Execute ENTRAID_AUTH primeiro.`,
+					);
+				}
+
+				const data = JSON.parse(stored);
+				return data.code_verifier;
+			},
 		},
 	],
 };
