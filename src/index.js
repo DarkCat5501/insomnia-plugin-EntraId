@@ -7,7 +7,7 @@ const STORE_PREFIX = "entraid_";
 
 function open(url) {
 	let command;
-	if (os.platform() === "win32") command = `start "${url}"`;
+	if (os.platform() === "win32") command = `start "" "${url}"`;
 	else if (os.platform() === "darwin") command = `open "${url}"`;
 	else command = `xdg-open "${url}"`;
 
