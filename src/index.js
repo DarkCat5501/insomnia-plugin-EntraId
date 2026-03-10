@@ -220,7 +220,8 @@ module.exports = {
 					const key = getStoreKey(varName);
 					await context.store.setItem(key, JSON.stringify(result));
 
-					return JSON.stringify(result, null, 2);
+					//NOTE: this url should not be called
+					return `http://response?code=${result.code}&verifier=${result.code_verifier}`;
 				} else {
 					const accountStr = selectAccount ? " [selectAccount]" : "";
 					return `EntraId: ${varName}${accountStr} [>${redirectUri}] clientId:${clientId}, scopes:${scopes}, authority: ${authority}`;
@@ -294,6 +295,40 @@ module.exports = {
 				const data = JSON.parse(stored);
 				return data.code_verifier;
 			},
+		},
+	],
+	requestHooks: [
+		async ({ request: req }) => {
+			const method = req.getMethod();
+			if (method === "ENTRAID") {
+				const url =new URL(req.getUrl())
+				const code = url.searchParams.get("code");
+				const verifier = url.searchParams.get("verifier");
+				console.log("EntraId code:", code)
+				console.log("EntraId verifier:", verifier)
+				req.setUrl("https://postman-echo.com/get");
+				req.setMethod("GET");
+				req.setHeader("$$EntraId", "true");
+				req.setHeader("$$PXXGP", code);
+				req.setHeader("$$YAU", verifier);
+			}
+		},
+	],
+	responseHooks: [
+		async ({ response: res, request: req }) => {
+			const isEntraId = req.getHeader("$$EntraId") === "true";
+
+			if (isEntraId) {
+				console.log("Response", res, req);
+				const code = req.getHeader("$$PXXGP");
+				const verifier = req.getHeader("$$YAU");
+				res.setBody(
+					JSON.stringify({
+						code,
+						verifier,
+					}),
+				);
+			}
 		},
 	],
 };
