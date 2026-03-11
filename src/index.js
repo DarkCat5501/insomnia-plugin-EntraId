@@ -71,12 +71,10 @@ function startCallbackServer(port) {
 			}, 60 * 1000);
 		});
 
-		server.on("error", (err) => {
-			if (err.code === "EADDRINUSE") {
-				resolve(startCallbackServer(port + 1));
-			} else {
-				resolve(null);
-			}
+		server.on("error", (_err) => {
+			if (timer) clearTimeout(timer);
+			reject(new Error("Can't start response server"));
+			server.close();
 		});
 	});
 }
@@ -87,6 +85,8 @@ async function authenticateEntraId(
 	redirectUri,
 	scopes,
 	selectAccount,
+	getAccess = false,
+	clientSecret = "",
 ) {
 	const { verifier, challenge } = generatePKCE();
 
@@ -101,9 +101,9 @@ async function authenticateEntraId(
 		`&scope=${encodeURIComponent(scopeStr)}` +
 		`&code_challenge=${challenge}` +
 		`&code_challenge_method=S256` +
-		promptParam;
+		promptParam +
+		`&state=${"teste123"}`;
 	//TODO: acrescentar o state
-	// +`&state=${state}`;
 
 	console.log("[EntraId] Abrindo navegador para autenticacao...");
 
@@ -112,6 +112,7 @@ async function authenticateEntraId(
 
 	const callbackPromise = startCallbackServer(port);
 	open(authUrl);
+	console.log("Verifier:", verifier);
 
 	console.log("[EntraId] Aguardando callback...");
 	const params = await callbackPromise;
@@ -219,12 +220,126 @@ module.exports = {
 					);
 					const key = getStoreKey(varName);
 					await context.store.setItem(key, JSON.stringify(result));
-
-					//NOTE: this url should not be called
-					return `http://response?code=${result.code}&verifier=${result.code_verifier}`;
+					return `http://response?type=code&code=${result.code}&verifier=${result.code_verifier}`;
 				} else {
 					const accountStr = selectAccount ? " [selectAccount]" : "";
 					return `EntraId: ${varName}${accountStr} [>${redirectUri}] clientId:${clientId}, scopes:${scopes}, authority: ${authority}`;
+				}
+			},
+		},
+		{
+			name: "ENTRAID_AUTH_OIDC",
+			label: "EntraId Auth",
+			icon: "fa-lock",
+			description: "Autentica com EntraId e puxa o accessToken e refreshToken",
+			args: [
+				{
+					name: "clientId",
+					displayName: "Client ID",
+					type: "string",
+					description: "Seu clientId do Azure AD",
+				},
+				{
+					name: "clientSecret",
+					displayName: "Client Secret",
+					type: "string",
+					description: "Seu clientSecret do Azure AD",
+				},
+				{
+					name: "authority",
+					displayName: "Authority",
+					type: "string",
+					description: "https://login.microsoftonline.com/your-tenant-id",
+				},
+				{
+					name: "redirectUri",
+					displayName: "Redirect URI",
+					type: "string",
+					description: "http://localhost:3847/callback",
+				},
+				{
+					name: "scopes",
+					displayName: "Scopes",
+					type: "string",
+					description: "User.Read",
+				},
+				{
+					name: "variable",
+					displayName: "Variable",
+					type: "string",
+					description: "Nome da variavel para salvar no store",
+				},
+				{
+					name: "selectAccount",
+					displayName: "Select Account",
+					type: "boolean",
+					description: "Mostrar tela de seleção de conta",
+					value: false,
+				},
+				{
+					name: "grantType",
+					displayName: "Select Account",
+					description: "Tipo de credencial gerada",
+					type: "enum",
+					options: [
+						{
+							displayName: "Authorization Code",
+							value: "authorization_code"
+						},
+						{
+							displayName: "Client Code",
+							value: "client_credentials"
+						}
+					],
+				},
+			],
+			liveDisplayName: (args) => {
+				const [
+					clientId,
+					_clientSecret,
+					authority,
+					redirectUri,
+					scopes,
+					variable,
+					selectAccount,
+					_grantType
+				] = args;
+
+				const varName = variable?.value || "default";
+				const accountStr = selectAccount?.value ? " [selectAccount]" : "";
+				return `EntraId: ${varName}${accountStr} [>${redirectUri.value}] clientId:${clientId.value}, scopes:${scopes.value}, authority: ${authority.value}`;
+			},
+			async run(context, ...args) {
+				const [
+					clientId,
+					clientSecret,
+					authority,
+					redirectUri,
+					scopes,
+					variable,
+					selectAccount,
+					grantType
+				] = args;
+				const varName = variable || "default";
+
+				if (context.renderPurpose === "send") {
+					const scopeArray = scopes
+						? scopes.split(" ").filter((s) => s)
+						: ["User.Read"];
+					const result = await authenticateEntraId(
+						clientId,
+						authority,
+						redirectUri,
+						scopeArray,
+						selectAccount,
+					);
+
+					const key = getStoreKey(varName);
+					await context.store.setItem(key, JSON.stringify(result));
+					return `http://response?type=auth&grantType=${grantType}&code=${result.code}&verifier=${result.code_verifier}&authority=${authority}&clientId=${clientId}&clientSecret=${clientSecret}&redirectUri=${redirectUri}&scope=${scopes}`;
+				} else {
+					const accountStr = selectAccount ? " [selectAccount]" : "";
+					return `EntraId OIDC: ${varName}${accountStr} [>${redirectUri}] clientId:${clientId}, scopes:${scopes}, authority: ${authority}`;
 				}
 			},
 		},
@@ -301,25 +416,50 @@ module.exports = {
 		async ({ request: req }) => {
 			const method = req.getMethod();
 			if (method === "ENTRAID") {
-				const url =new URL(req.getUrl())
+				const url = new URL(req.getUrl());
+				const type = url.searchParams.get("type");
 				const code = url.searchParams.get("code");
 				const verifier = url.searchParams.get("verifier");
-				console.log("EntraId code:", code)
-				console.log("EntraId verifier:", verifier)
-				req.setUrl("https://postman-echo.com/get");
-				req.setMethod("GET");
-				req.setHeader("$$EntraId", "true");
-				req.setHeader("$$PXXGP", code);
-				req.setHeader("$$YAU", verifier);
+				console.log("EntraId code:", code);
+				console.log("EntraId verifier:", verifier);
+				if (type == "code") {
+					req.setUrl("https://postman-echo.com/get");
+					req.setMethod("GET");
+					req.setHeader("$$EntraId", "true");
+					req.setHeader("$$PXXGP", code);
+					req.setHeader("$$YAU", verifier);
+				} else if (type == "auth") {
+					const authority = url.searchParams.get("authority");
+					const clientId = url.searchParams.get("clientId");
+					const clientSecret = url.searchParams.get("clientSecret");
+					const redirectUri = url.searchParams.get("redirectUri");
+					const grantType = url.searchParams.get("grantType");
+					const scope = url.searchParams.get("scope");
+					req.setMethod("POST");
+					req.setUrl(`${authority}/oauth2/v2.0/token`);
+					req.setHeader("Content-Type", "application/x-www-form-urlencoded");
+					req.setBody({
+						mimeType: "application/x-www-form-urlencoded",
+						params: [
+							{ name: "grant_type", value: grantType },
+							{ name: "client_id", value: clientId },
+							{ name: "code", value: code },
+							{ name: "code_verifier", value: verifier },
+							{ name: "redirect_uri", value: redirectUri },
+							{ name: "scope", value: scope },
+							...(clientSecret
+								? [{ name: "client_secret", value: clientSecret }]
+								: []),
+						],
+					});
+				}
 			}
 		},
 	],
 	responseHooks: [
 		async ({ response: res, request: req }) => {
 			const isEntraId = req.getHeader("$$EntraId") === "true";
-
 			if (isEntraId) {
-				console.log("Response", res, req);
 				const code = req.getHeader("$$PXXGP");
 				const verifier = req.getHeader("$$YAU");
 				res.setBody(
