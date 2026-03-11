@@ -35,11 +35,23 @@ function parseUrl(urlStr) {
 	}
 }
 
+var server = null;
+
 function startCallbackServer(port) {
 	return new Promise((resolve, reject) => {
 		let timer;
 
-		const server = http.createServer((req, res) => {
+
+		const killServer = () => {
+			server.close();
+			if (timer) clearTimeout(timer);
+			server = null;
+			reject(new Error("Got killed"))
+		};
+
+		if (server) killServer();
+
+		server = http.createServer((req, res) => {
 			const parsedUrl = parseUrl(`http://localhost${req.url}`);
 
 			if (parsedUrl) {
@@ -53,12 +65,14 @@ function startCallbackServer(port) {
 					"<html><body><h1>Autenticado com sucesso!</h1><p>Voce pode fechar esta aba e retornar ao Insomnia.</p><script>window.close()</script></body></html>",
 				);
 
-				server.close();
-				if (timer) clearTimeout(timer);
 				resolve(params);
+				killServer();
 			} else {
-				res.writeHead(400);
-				res.end("Invalid request");
+				res.writeHead(400, { "Content-Type": "text/html" });
+				res.end("<html><body><h1>Dados inválidos.</p></body></html>");
+
+				reject(new Error("Invalid request received"));
+				killServer();
 			}
 		});
 
@@ -66,15 +80,14 @@ function startCallbackServer(port) {
 			console.log(`[EntraId] Servidor de callback iniciado na porta ${port}`);
 
 			timer = setTimeout(() => {
-				server.close();
 				reject(new Error("Timeout was reached"));
+				killServer();
 			}, 60 * 1000);
 		});
 
 		server.on("error", (_err) => {
-			if (timer) clearTimeout(timer);
 			reject(new Error("Can't start response server"));
-			server.close();
+			killServer();
 		});
 	});
 }
@@ -284,12 +297,12 @@ module.exports = {
 					options: [
 						{
 							displayName: "Authorization Code",
-							value: "authorization_code"
+							value: "authorization_code",
 						},
 						{
 							displayName: "Client Code",
-							value: "client_credentials"
-						}
+							value: "client_credentials",
+						},
 					],
 				},
 			],
@@ -302,7 +315,7 @@ module.exports = {
 					scopes,
 					variable,
 					selectAccount,
-					_grantType
+					_grantType,
 				] = args;
 
 				const varName = variable?.value || "default";
@@ -318,7 +331,7 @@ module.exports = {
 					scopes,
 					variable,
 					selectAccount,
-					grantType
+					grantType,
 				] = args;
 				const varName = variable || "default";
 
